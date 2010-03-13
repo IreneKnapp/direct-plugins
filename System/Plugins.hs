@@ -1,64 +1,75 @@
-{-# LANGUAGE FlexibleInstances #-}
-module System.Plugins where
+module System.Plugins (load) where
 
 import qualified BasicTypes
 import qualified DynFlags
 import qualified Encoding
+import qualified Exception
 import qualified FastString
 import qualified GHC
 import qualified GHC.Exts
 import qualified GHC.Paths (libdir)
 import qualified Linker
 import qualified Module
+import MonadUtils (liftIO)
+import qualified Name
 import qualified ObjLink
+import qualified OccName
 import qualified Packages
-import MonadUtils
+import qualified SrcLoc
+import qualified Unique
+import Unsafe.Coerce
 
 
-main :: IO ()
-main = GHC.defaultErrorHandler DynFlags.defaultDynFlags $ do
-         GHC.runGhc (Just GHC.Paths.libdir) $ do
-           flags <- GHC.getSessionDynFlags
-           GHC.setSessionDynFlags flags
-           
-           (flags, _) <- liftIO $ Packages.initPackages flags
-           
-           liftIO $ Linker.initDynLinker flags
-           let packageId = Module.fsToPackageId (FastString.mkFastString "hello-1.0")
-           liftIO $ Linker.linkPackages flags [packageId]
-           
-           liftIO $ testSymbol $
-                           "__stginit_"
-                           ++ (Encoding.zEncodeString "array-0.3.0.0")
-                           ++ "_"
-                           ++ (Encoding.zEncodeString "Data.Array")
-           liftIO $ testSymbol $
-                           (Encoding.zEncodeString "array-0.3.0.0")
-                           ++ "_"
-                           ++ (Encoding.zEncodeString "Data.Array.Base")
-                           ++ "_"
-                           ++ (Encoding.zEncodeString "array")
-                           ++ "_closure"
-           liftIO $ testSymbol $ "__stginit_base_DataziBits_"
-           liftIO $ testSymbol $ "__stginit_mtlzm1zi1zi0zi2_ControlziMonadziCont"
-           liftIO $ testSymbol $ "FruitTartInterfacezm1zi0_NetworkziFruitTartziBase_canonicalURL_closure"
-           liftIO $ testSymbol $ "FruitTartInterfacezm1zi0_NetworkziFruitTartziBase_canonicalURL_closure"
+load :: (String, String, String) -> IO (Maybe a)
+load symbol@(packageName, moduleName, symbolName)
+    = GHC.defaultErrorHandler DynFlags.defaultDynFlags $ do
+        GHC.runGhc (Just GHC.Paths.libdir) $ do
+          flags <- GHC.getSessionDynFlags
+          GHC.setSessionDynFlags flags
+          
+          (flags, _) <- liftIO $ Packages.initPackages flags
+          
+          liftIO $ Linker.initDynLinker flags
+          let packageId = Module.fsToPackageId (FastString.mkFastString packageName)
+          Exception.ghandle
+            (\(GHC.CmdLineError _) -> do
+               liftIO $ putStrLn $ "Unknown package " ++ packageName ++ "."
+               return Nothing)
+            (do
+              liftIO $ Linker.linkPackages flags [packageId]
+              
+              Exception.ghandle
+                (\(GHC.ProgramError string) -> do
+                   if (hasPrefix string "Failed to load interface ")
+                     then liftIO $ putStrLn $ "Unknown module " ++ moduleName
+                                            ++ " in package " ++ packageName
+                                            ++ "."
+                     else liftIO $ putStrLn $ "Unknown symbol " ++ symbolName
+                                            ++ " in module " ++ moduleName
+                                            ++ " in package " ++ packageName
+                                            ++ "."
+                   return Nothing)
+                (do
+                  session <- GHC.getSession
+                  let name = Name.mkExternalName
+                               (Unique.mkBuiltinUnique 0)
+                               (Module.mkModule packageId
+                                                (Module.mkModuleName moduleName))
+                               (OccName.mkVarOcc symbolName)
+                               SrcLoc.noSrcSpan
+                  result <- liftIO $ Linker.getHValue session name
+                  return $ Just $ unsafeCoerce result))
 
-           maybePointer <- ObjLink.lookupSymbol $
-                           (Encoding.zEncodeString "hello-1.0")
-                           ++ "_"
-                           ++ (Encoding.zEncodeString "Hello")
-                           ++ "_"
-                           ++ (Encoding.zEncodeString "hello")
-                           ++ "_closure"
-           case maybePointer of
-             Nothing -> putStrLn $ "Unable to load hello."
-             Just pointer -> do
-               case GHC.Exts.addrToHValue# pointer of
-                 (# hValue #) -> putStrLn $ hValue
-           putStrLn "foom"
 
-testSymbol :: String -> IO ()
-testSymbol symbol = do
-  maybePointer <- ObjLink.lookupSymbol symbol
-  putStrLn $ symbol ++ " -> " ++ (show maybePointer)
+encodeSymbol :: (String, String, String) -> String
+encodeSymbol (packageName, moduleName, symbolName)
+    = (Encoding.zEncodeString packageName)
+      ++ "_"
+      ++ (Encoding.zEncodeString moduleName)
+      ++ "_"
+      ++ (Encoding.zEncodeString symbolName)
+      ++ "_closure"
+
+
+hasPrefix :: String -> String -> Bool
+hasPrefix string prefix = take (length prefix) string == prefix
