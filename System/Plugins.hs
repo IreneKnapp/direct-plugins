@@ -1,4 +1,7 @@
-module System.Plugins (load, loadDynamic) where
+-- | The recommended interface, because it is safer (guaranteed not to crash as long
+--   as modules have not been mis-installed somehow), is 'loadDynamic'.  For
+--   versatility's sake, 'unsafeLoad' is provided as well, but caveat codor!
+module System.Plugins (unsafeLoad, loadDynamic) where
 
 import Data.Dynamic
 import Data.IORef
@@ -36,8 +39,38 @@ import qualified UniqSupply
 import qualified Unique
 
 
-load :: (String, String, String) -> IO (Maybe a)
-load symbol@(packageName, moduleName, symbolName)
+-- | Resolves the specified symbol to any given type.  This means linking the package
+--   containing it if it is not already linked, extracting the value of that symbol,
+--   and returning that value.  Because a call is made to 'unsafeCoerce', the behavior
+--   is unpredictable (most likely an immediate crash) if the symbol is not actually of
+--   the expected type.  Because 'load' has no a priori way to know the type, you must
+--   be certain to provide adequate type information in the caller, ie by giving a
+--   type signature.
+--   
+--   Three error conditions are detected and handled nicely, returning
+--   'Nothing':  The package does not exist; the package does not contain the given
+--   module; or the module does not contain a symbol by the given name.
+--   
+--   As a limitation which may be relaxed in a future version, note that re-exports
+--   are not chased; thus for example it is not possible to find the symbol
+--   @base:Prelude.sum@, because that symbol is actually defined in @base:Data.List@.
+unsafeLoad
+    :: (String, String, String)
+    -- ^ A tuple (@packageName@, @moduleName@, @symbolName@), specifying a symbol in
+    --   a package installed somewhere in ghc's database.
+    --   
+    --   @packageName@ is a full package name including a version,
+    --   ie @\"hello-1.0\"@; you can inspect these package names through
+    --   @ghc-pkg@.
+    --   
+    --   @moduleName@ is a fully-qualified module name, ie @\"Hello\"@ or
+    --   @\"Data.Dynamic\"@.
+    --   
+    --   @symbolName@ is an unqualified symbol name, ie @\"hello\"@.
+    -> IO (Maybe a)
+    -- ^ If the specified symbol is found, 'Just' its
+    --   value.  Otherwise, 'Nothing'.
+unsafeLoad symbol@(packageName, moduleName, symbolName)
     = GHC.defaultErrorHandler DynFlags.defaultDynFlags $ do
         GHC.runGhc (Just GHC.Paths.libdir) $ do
           flags <- GHC.getSessionDynFlags
@@ -77,7 +110,38 @@ load symbol@(packageName, moduleName, symbolName)
                   return $ Just $ unsafeCoerce result))
 
 
-loadDynamic :: (String, String, String) -> IO (Maybe Dynamic)
+-- | Resolves the specified symbol to a Dynamic.  This means first parsing the installed
+--   .hi file for the package containing the symbol to verify that the symbol is in fact
+--   a Dynamic, then, if it is, linking the package if it is not already linked,
+--   extracting the value of that symbol, and returning that value.  Unlike 'load', this
+--   function should be \"perfectly safe\", not crashing even if the symbol is not
+--   actually of the expected type.
+--   
+--   Four error conditions are detected and handled nicely, returning
+--   'Nothing':  The package does not exist; the package does not contain the given
+--   module; the module does not contain a symbol by the given name; or the symbol's type
+--   is not 'Dynamic'.
+--   
+--   As a limitation which may be relaxed in a future version, note that re-exports are
+--   not chased; thus for example it is not possible to find the symbol
+--   @base:Prelude.sum@, because that symbol is actually defined in @base:Data.List@.
+--   (Also because that symbol is not a 'Dynamic'.)
+loadDynamic
+    :: (String, String, String)
+    -- ^ A tuple (@packageName@, @moduleName@, @symbolName@), specifying a symbol in
+    --   a package installed somewhere in ghc's database.
+    --   
+    --   @packageName@ is a full package name including a version,
+    --   ie @\"hello-1.0\"@; you can inspect these package names through
+    --   @ghc-pkg@.
+    --   
+    --   @moduleName@ is a fully-qualified module name, ie @\"Hello\"@ or
+    --   @\"Data.Dynamic\"@.
+    --   
+    --   @symbolName@ is an unqualified symbol name, ie @\"hello\"@.
+    -> IO (Maybe Dynamic)
+    -- ^ If the specified symbol is found and of an appropriate type, 'Just' its
+    --   value.  Otherwise, 'Nothing'.
 loadDynamic symbol = do
   maybeInterfaceType <- symbolInterfaceType symbol
   case maybeInterfaceType of
@@ -86,7 +150,7 @@ loadDynamic symbol = do
       let isDynamic = interfaceTypeIsDynamic interfaceType
       case isDynamic of
         False -> return Nothing
-        True -> load symbol
+        True -> unsafeLoad symbol
 
 
 symbolInterfaceType :: (String, String, String) -> IO (Maybe IfaceType.IfaceType)
